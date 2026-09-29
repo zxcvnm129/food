@@ -59,47 +59,29 @@ def get_api_key():
 
 
 @st.cache_data(ttl=3600)
-def search_schools(api_key, office_code, school_name):
-    """학교 이름으로 학교를 검색합니다."""
-    url = f"{BASE_URL}/SchoolInfo"
-    params = {
-        "KEY": api_key,
-        "Type": "json",
-        "pIndex": 1,
-        "pSize": 100,
-        "ATPT_OFCDC_SC_CODE": office_code,
-        "SCHUL_NM": school_name.strip(),
-    }
-
-    response = requests.get(url, params=params, timeout=15)
-    response.raise_for_status()
-    data = response.json()
-
-    if "SchoolInfo" not in data:
-        return pd.DataFrame()
-
-    rows = data["SchoolInfo"][1].get("row", [])
-    if not rows:
-        return pd.DataFrame()
-
-    result = pd.DataFrame(rows)
-
-    wanted = [
-        "ATPT_OFCDC_SC_CODE",
-        "ATPT_OFCDC_SC_NM",
-        "SD_SCHUL_CODE",
-        "SCHUL_NM",
-        "SCHUL_KND_SC_NM",
-        "LCTN_SC_NM",
-        "ORG_RDNMA",
-    ]
-
+def get_all_schools(api_key, office_code):
+    url = f"{BASE_URL}/schoolInfo"
+    rows=[]; page=1; page_size=1000
+    while True:
+        params={"KEY":api_key,"Type":"json","pIndex":page,"pSize":page_size,"ATPT_OFCDC_SC_CODE":office_code}
+        r=requests.get(url,params=params,timeout=20); r.raise_for_status(); data=r.json()
+        if "schoolInfo" not in data or len(data["schoolInfo"])<2: break
+        part=data["schoolInfo"][1].get("row",[])
+        if not part: break
+        rows.extend(part)
+        if len(part)<page_size or page>=20: break
+        page+=1
+    if not rows: return pd.DataFrame()
+    df=pd.DataFrame(rows)
+    wanted=["ATPT_OFCDC_SC_CODE","ATPT_OFCDC_SC_NM","SD_SCHUL_CODE","SCHUL_NM","SCHUL_KND_SC_NM","LCTN_SC_NM","ORG_RDNMA"]
     for col in wanted:
-        if col not in result.columns:
-            result[col] = ""
+        if col not in df.columns: df[col]=""
+    return df[wanted].drop_duplicates("SD_SCHUL_CODE").reset_index(drop=True)
 
-    return result[wanted].copy()
-
+def filter_schools(schools, keyword):
+    key=keyword.strip().lower()
+    if not key: return pd.DataFrame()
+    return schools[schools["SCHUL_NM"].astype(str).str.lower().str.contains(key,regex=False,na=False)].copy()
 
 @st.cache_data(ttl=1800)
 def get_meals(api_key, office_code, school_code, start_date, end_date, meal_code):
@@ -207,53 +189,34 @@ search_clicked = st.button("🔎 학교 검색", type="primary", use_container_w
 if search_clicked:
     if not school_name.strip():
         st.warning("학교 이름을 입력해주세요.")
-    else:
-        try:
-            with st.spinner("학교를 찾는 중입니다..."):
-                schools = search_schools(
-                    api_key,
-                    EDUCATION_OFFICES[office_name],
-                    school_name,
-                )
+        st.stop()
+    try:
+        with st.spinner("학교 목록을 불러오는 중입니다..."):
+            all_schools=get_all_schools(api_key, EDUCATION_OFFICES[office_name])
+        st.session_state["schools"]=filter_schools(all_schools, school_name)
+    except requests.RequestException:
+        st.error("NEIS API에 연결하지 못했습니다. 잠시 후 다시 시도해주세요.")
+        st.stop()
+    except Exception as e:
+        st.error(f"학교 검색 중 오류가 발생했습니다: {e}")
+        st.stop()
 
-            if schools.empty:
-                st.warning("검색 결과가 없습니다. 학교 이름을 다시 확인해주세요.")
-                st.session_state["schools"] = pd.DataFrame()
-            else:
-                st.session_state["schools"] = schools
-
-        except requests.RequestException:
-            st.error("NEIS API에 연결하지 못했습니다. 잠시 후 다시 시도해주세요.")
-        except Exception as e:
-            st.error(f"학교 검색 중 오류가 발생했습니다: {e}")
-
-
-schools = st.session_state.get("schools", pd.DataFrame())
-
+schools=st.session_state.get("schools",pd.DataFrame())
 if schools.empty:
+    st.info("학교 이름을 입력하고 **학교 검색** 버튼을 눌러주세요.")
     st.stop()
 
-school_options = []
-for idx, row in schools.iterrows():
-    address = row.get("ORG_RDNMA", "")
-    kind = row.get("SCHUL_KND_SC_NM", "")
-    label = f"{row['SCHUL_NM']} ({kind})"
-    if address:
-        label += f" - {address}"
-    school_options.append((idx, label))
-
-selected_idx = st.selectbox(
-    "검색된 학교 중 하나를 선택하세요.",
-    range(len(school_options)),
-    format_func=lambda i: school_options[i][1],
-)
-
-selected_row = schools.loc[school_options[selected_idx][0]]
-
-selected_school_name = selected_row["SCHUL_NM"]
-selected_school_code = selected_row["SD_SCHUL_CODE"]
-selected_office_code = selected_row["ATPT_OFCDC_SC_CODE"]
-
+st.success(f"학교 검색 결과: {len(schools)}곳")
+school_options=[]
+for idx,row in schools.iterrows():
+    label=f"{row['SCHUL_NM']} ({row['SCHUL_KND_SC_NM']})"
+    if row.get("ORG_RDNMA",""): label += f" - {row['ORG_RDNMA']}"
+    school_options.append((idx,label))
+selected_idx=st.selectbox("조회할 학교를 선택하세요.",range(len(school_options)),format_func=lambda i: school_options[i][1])
+selected_row=schools.loc[school_options[selected_idx][0]]
+selected_school_name=selected_row["SCHUL_NM"]
+selected_school_code=selected_row["SD_SCHUL_CODE"]
+selected_office_code=selected_row["ATPT_OFCDC_SC_CODE"]
 
 # ------------------------------------------------------------
 # 기간 / 식사 선택
